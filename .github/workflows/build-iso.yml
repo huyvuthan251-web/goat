@@ -36,13 +36,43 @@ jobs:
       - name: Install build dependencies
         run: bash scripts/install-ubuntu-build-deps.sh
 
-      - name: Clone T2 kèm submodule
+      - name: Clone T2
         run: |
-          git clone --recurse-submodules --shallow-submodules --depth 1 \
-            https://github.com/rxrbln/t2sde.git "$T2_DIR"
-          echo '--- submodule ---'
-          git -C "$T2_DIR" submodule status || true
-          cat "$T2_DIR/.gitmodules" 2>/dev/null || true
+          git clone --depth 1 https://github.com/rxrbln/t2sde.git "$T2_DIR"
+          git -C "$T2_DIR" fetch --shallow-since="$(date -d '300 days ago' +%F)" origin || true
+          git -C "$T2_DIR" log --oneline -3
+
+      - name: Chọn bản T2 build được luabash
+        working-directory: /mnt/work/t2sde
+        run: |
+          set +e
+          ok=0
+          for d in 0 14 30 60 90 150 240; do
+            if [ "$d" = 0 ]; then c="$(git rev-parse origin/HEAD)"; else c="$(git rev-list -1 --before="$d days ago" origin/HEAD)"; fi
+            [ -n "$c" ] || continue
+            echo "===== Thử T2 cách đây $d ngày: $c ====="
+            sudo git clean -fdxq
+            git checkout -q -f "$c"
+            git submodule update --init --recursive 2>&1 | tail -n 3
+            sudo timeout 180 ./t2 config -cfg luatest -oldconfig < /dev/null > /tmp/luatest.log 2>&1
+            tail -n 6 /tmp/luatest.log
+            if ls src/bash/luabash.* >/dev/null 2>&1; then
+              echo ">>> luabash build được ở bản này ($d ngày trước)"
+              ok=1
+              break
+            fi
+          done
+          sudo rm -rf config/luatest
+          if [ "$ok" != 1 ]; then
+            echo 'Không bản T2 nào build được luabash.'
+            echo '--- Config: các dòng liên quan ---'
+            grep -n 'luabash' scripts/Config | head -20
+            echo '--- Makefile luabash ---'
+            sed -n 1,30p misc/luabash/Makefile
+            ls -la misc/luabash misc/luabash/bash 2>&1 | head -40
+            exit 1
+          fi
+          git log -1 --format='T2 đang dùng: %H %cd'
 
       - name: Bootstrap T2 and install the flinux target
         run: bash scripts/bootstrap-t2.sh
@@ -68,24 +98,18 @@ jobs:
           SDECFG_ARCH='x86-64'
           SDECFG_PKGFILE_TYPE='tar.zst'
           CFG
-          sudo ./t2 config -cfg flinux -accept-defaults 2>&1 | tail -n 40
-          if [ ! -s config/flinux/packages ]; then
-            echo '===== thử cách 2 ====='
-            yes '' | sudo ./t2 config -cfg flinux 2>&1 | tail -n 40
-          fi
+          sudo timeout 600 ./t2 config -cfg flinux -oldconfig < /dev/null 2>&1 | tail -n 40
+          ls -la config/flinux/
           if [ ! -s config/flinux/packages ]; then
             echo '===== DIAGNOSE ====='
-            git log -1 --format='%H %cd'
-            git submodule status
-            echo '--- misc/luabash ---'
-            ls -la misc/luabash
-            sed -n 1,30p misc/luabash/Makefile
-            ls -la misc/luabash/bash 2>&1 | head -30
-            sed -n 1,20p misc/luabash/bash/Makefile 2>&1
-            echo '--- tìm bottom.make ---'
-            find . -name 'bottom.make' | head
-            echo '--- tùy chọn của scripts/Config ---'
-            grep -nE '^ *-[a-zA-Z-]+[|)]' scripts/Config | head -40
+            echo '--- Config: các dòng liên quan tới oldconfig/packages ---'
+            grep -n -e oldconfig -e 'Create-PkgList' -e 'packages' scripts/Config | head -40
+            echo '--- thử tạo danh sách gói trực tiếp ---'
+            ls scripts | grep -i -e pkg -e list | head
+            sudo ./scripts/Create-PkgList -cfg flinux 2>&1 | tail -n 20
+            ls -la config/flinux/
+          fi
+          if [ ! -s config/flinux/packages ]; then
             echo 'T2 config không tạo được config/flinux/packages'
             exit 1
           fi
